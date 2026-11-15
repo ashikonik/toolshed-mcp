@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createWriteStream, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { readdir, readFile, writeFile } from 'node:fs/promises';
+import { writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { createInflateRaw } from 'node:zlib';
@@ -30,6 +31,35 @@ export interface GitHubRepo {
   /** Optional git ref: branch, tag or commit sha. */
   ref?: string;
 }
+
+/**
+ * The paths a sparse checkout asks for.
+ *
+ * A repository has no fixed layout for its skills — the loader walks the
+ * tree for any directory holding a `SKILL.md` — so the patterns name every
+ * conventional location rather than one. A pattern that matches nothing
+ * costs nothing: git simply does not check that path out.
+ *
+ * The patterns are deliberately shallow. `skills` plus a wildcard matches a
+ * skill directory, and two wildcards match a file inside it, but neither
+ * reaches arbitrarily deep, because the point of the sparse checkout is
+ * to leave the bulk of the tree alone.
+ */
+export const SKILL_PATH_PATTERNS = [
+  'skills/*',
+  'skills/*/*',
+  'skills/*/*/*',
+  '.claude/skills/*',
+  '.claude/skills/*/*',
+  '.claude/skills/*/*/*',
+  '.puku-cli/skills/*',
+  '.puku-cli/skills/*/*',
+  '.puku-cli/agents/*',
+  'agents/*',
+  'commands/*',
+  'SKILL.md',
+  '*/SKILL.md',
+] as const;
 
 /** Parse `owner/repo`, `owner/repo@ref`, or a full GitHub URL. */
 export function parseRepo(input: string): GitHubRepo | undefined {
@@ -232,11 +262,9 @@ export async function fetchRepo(
   targetDir: string,
   options: { timeoutMs?: number; ref?: string } = {},
 ): Promise<FetchResult> {
-  // A big repository on a slow link legitimately takes minutes: the
-  // `expo/exact` zip is over 30 MB, which is more than three minutes at
-  // the bandwidth a modest connection gives. The timeout is generous
-  // by default and overridable, because aborting a fetch that was about
-  // to succeed wastes more time than waiting.
+  // A big repository on a slow link legitimately takes minutes, so the
+  // timeout is generous by default and overridable: aborting a fetch that
+  // was about to succeed wastes more time than waiting.
   const timeoutMs = options.timeoutMs ?? fetchTimeoutMs();
   const ref = options.ref ?? repo.ref ?? 'HEAD';
   const token = githubToken();
@@ -249,6 +277,20 @@ export async function fetchRepo(
 
   const zipUrl = `https://codeload.github.com/${repo.owner}/${repo.repo}/zip/${ref}`;
   const zipAttempt = await tryZip(zipUrl, targetDir, headers, timeoutMs);
+
+  // An oversized archive is not a transient failure, so it is not retried
+  // by another route. The git path would download the same tree blob by
+  // blob and land in the same place: slower, and the same size. The
+  // refusal says what to change instead.
+  if (zipAttempt === 'too-large') {
+    throw new Error(
+      `the archive for ${repo.owner}/${repo.repo} is larger than the ` +
+        `${maxDownloadBytes()} byte download limit. Set ` +
+        `TOOLSHED_MAX_DOWNLOAD_BYTES to a larger value to allow it, or ` +
+        `register a smaller repository.`,
+    );
+  }
+
   if (zipAttempt) {
     return zipAttempt;
   }
@@ -260,24 +302,128 @@ export async function fetchRepo(
   return { ...result, method: 'git' };
 }
 
-/** Fetch and unpack a zip archive. Returns undefined when it cannot. */
+/**
+ * Fetch a repository into `targetDir`, preferring the sparse git path.
+ *
+ * The zip route is tried first because it needs no git binary, but it
+ * downloads the whole repository. The git route is a blobless partial
+ * clone restricted to the skill paths, which is dramatically smaller for
+ * a monorepo: the `expo/exact` zip is 212 MB and holds eight skill files,
+ * while the sparse clone of the same repository is about 3 MB.
+ */
+export async function fetchRepoSparseFirst(
+  repo: GitHubRepo,
+  targetDir: string,
+  options: { timeoutMs?: number; ref?: string; extraPatterns?: string[] } = {},
+): Promise<FetchResult> {
+  const timeoutMs = options.timeoutMs ?? fetchTimeoutMs();
+  const ref = options.ref ?? repo.ref ?? 'HEAD';
+
+  // The git route is tried first because it is the one that scales. When
+  // it fails — no git binary, no network, a private repo that needs a
+  // token — the zip route is the fallback.
+  try {
+    const result = await gitClone(repo, targetDir, timeoutMs, ref, options.extraPatterns ?? []);
+    if (result.fileCount > 0) return result;
+  } catch {
+    // Fall through to the zip route.
+  }
+
+  const token = githubToken();
+  const headers: Record<string, string> = {
+    'user-agent': 'toolshed-mcp',
+    accept: 'application/vnd.github+json',
+  };
+  if (token) headers.authorization = `Bearer ${token}`;
+
+  const zipUrl = `https://codeload.github.com/${repo.owner}/${repo.repo}/zip/${ref}`;
+  const zipAttempt = await tryZip(zipUrl, targetDir, headers, timeoutMs);
+  if (zipAttempt === 'too-large') {
+    throw new Error(
+      `the archive for ${repo.owner}/${repo.repo} is larger than the ` +
+        `${maxDownloadBytes()} byte download limit. Set ` +
+        `TOOLSHED_MAX_DOWNLOAD_BYTES to a larger value to allow it, or ` +
+        `register a smaller repository.`,
+    );
+  }
+  if (zipAttempt) return zipAttempt;
+
+  throw new Error(
+    `could not fetch ${repo.owner}/${repo.repo}: neither the sparse git ` +
+      `clone nor the archive download succeeded`,
+  );
+}
+
+/**
+ * The largest archive the toolshed will download, in bytes.
+ *
+ * A GitHub archive of a monorepo is unbounded: the `expo/exact` archive is
+ * over 210 MB, and it holds eight small skill files. Downloading all of it
+ * to index those eight files burns minutes of a link and hundreds of
+ * megabytes of disk for content the registry never reads.
+ *
+ * The cap is a safety limit, not a target. A repository whose archive
+ * exceeds it is refused, and the reason is reported, because "the download
+ * was too big" and "the network failed" are very different problems for
+ * the person who asked.
+ */
+export function maxDownloadBytes(): number {
+  const raw = process.env.TOOLSHED_MAX_DOWNLOAD_BYTES;
+  if (raw) {
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return 50 * 1024 * 1024;
+}
+
+/**
+ * Fetch and unpack a zip archive.
+ *
+ * Returns undefined when the archive could not be fetched, and the string
+ * `'too-large'` when it was fetched but exceeded the download cap. The two
+ * are different outcomes for the caller: one is worth retrying by another
+ * route, the other is a refusal.
+ */
 async function tryZip(
   url: string,
   targetDir: string,
   headers: Record<string, string>,
   timeoutMs: number,
-): Promise<FetchResult | undefined> {
+): Promise<FetchResult | 'too-large' | undefined> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const tmpZip = join(targetDir, '.download.zip');
+  let tooLarge = false;
   try {
     const response = await fetch(url, { headers, signal: controller.signal });
     if (!response.ok || !response.body) {
       return undefined;
     }
-    const tmpZip = join(targetDir, '.download.zip');
     mkdirSync(dirname(tmpZip), { recursive: true });
+
+    // Count the bytes as they stream and abort past the cap. GitHub sends
+    // no content-length for an archive, so the limit can only be enforced
+    // while reading.
+    const limit = maxDownloadBytes();
+    let received = 0;
+    const counter = new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, streamController) {
+        received += chunk.byteLength;
+        if (received > limit) {
+          tooLarge = true;
+          streamController.error(
+            new Error(`archive exceeds the ${limit} byte download limit`),
+          );
+          return;
+        }
+        streamController.enqueue(chunk);
+      },
+    });
+
     await pipeline(
-      Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]),
+      Readable.fromWeb(
+        response.body.pipeThrough(counter) as Parameters<typeof Readable.fromWeb>[0],
+      ),
       createWriteStream(tmpZip),
     );
 
@@ -286,7 +432,10 @@ async function tryZip(
     if (!extracted) return undefined;
     return { dir: targetDir, method: 'zip', fileCount: extracted.fileCount, bytes: extracted.bytes };
   } catch {
-    return undefined;
+    // A partial download is not worth keeping: it is dead weight that the
+    // next attempt would overwrite anyway.
+    rmSync(tmpZip, { force: true });
+    return tooLarge ? 'too-large' : undefined;
   } finally {
     clearTimeout(timer);
   }
@@ -400,6 +549,7 @@ async function gitClone(
   targetDir: string,
   timeoutMs: number,
   ref: string,
+  extraPatterns: string[] = [],
 ): Promise<FetchResult> {
   const token = githubToken();
   const url = token
@@ -433,8 +583,47 @@ async function gitClone(
   if (sparse.code !== 0) {
     throw new Error(`git sparse-checkout config failed: ${redactToken(sparse.stderr.trim())}`);
   }
+  // Non-cone mode, because the patterns below are path globs rather than
+  // the directory prefixes cone mode requires.
+  const cone = await runCommand(
+    ['git', 'config', 'core.sparseCheckoutCone', 'false'],
+    { cwd: targetDir, timeoutMs, env },
+  );
+  if (cone.code !== 0) {
+    throw new Error(`git sparse-checkout cone config failed: ${redactToken(cone.stderr.trim())}`);
+  }
+
+  // A blobless partial clone is what makes a monorepo cheap. The filter
+  // tells the server to send tree objects only; the blobs for the paths
+  // the sparse checkout names are then fetched on demand. The `expo/exact`
+  // archive is 212 MB and holds eight skill files; this fetches the same
+  // eight files in about 3 MB.
+  const promisor = await runCommand(
+    ['git', 'config', 'remote.origin.promisor', 'true'],
+    { cwd: targetDir, timeoutMs, env },
+  );
+  if (promisor.code !== 0) {
+    throw new Error(`git promisor config failed: ${redactToken(promisor.stderr.trim())}`);
+  }
+  const partial = await runCommand(
+    ['git', 'config', 'remote.origin.partialclonefilter', 'blob:none'],
+    { cwd: targetDir, timeoutMs, env },
+  );
+  if (partial.code !== 0) {
+    throw new Error(`git partial-clone config failed: ${redactToken(partial.stderr.trim())}`);
+  }
+
+  // The sparse checkout names only the paths a registry cares about. A
+  // repository may put its skills in any of the conventional places, so
+  // all of them are listed; a path that does not exist is simply absent
+  // from the checkout.
+  const patterns = [...SKILL_PATH_PATTERNS, ...extraPatterns].join('\n');
+  const sparseFile = join(targetDir, '.git', 'info', 'sparse-checkout');
+  mkdirSync(dirname(sparseFile), { recursive: true });
+  writeFileSync(sparseFile, `${patterns}\n`);
+
   const fetch = await runCommand(
-    ['git', 'fetch', '-q', '--depth', '1', 'origin', ref],
+    ['git', 'fetch', '-q', '--depth', '1', '--filter=blob:none', 'origin', ref],
     { cwd: targetDir, timeoutMs, env },
   );
   if (fetch.code !== 0) {
@@ -486,7 +675,15 @@ export async function fetchSkill(
   targetDir: string,
   options: { timeoutMs?: number; ref?: string } = {},
 ): Promise<FetchResult> {
-  const result = await fetchRepo(repo, targetDir, options);
+  // The requested path is added to the sparse checkout patterns, because
+  // the default patterns name the conventional skill locations and this
+  // path may be somewhere else. Without it the directory would simply not
+  // be checked out, and the fetch would fail with a misleading
+  // "path not found".
+  const result = await fetchRepoSparseFirst(repo, targetDir, {
+    ...options,
+    extraPatterns: [path, `${path}/*`, `${path}/*/*`, `${path}/*/*/*`],
+  });
 
   // The zip has a single top-level directory (owner-repo-sha); flatten it so
   // the skill path resolves predictably.

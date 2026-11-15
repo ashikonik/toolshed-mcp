@@ -8,10 +8,12 @@ import {
   fetchTimeoutMs,
   isSafeRelativePath,
   isValidSkillName,
+  maxDownloadBytes,
   parseRepo,
   redactToken,
   repoCacheDir,
   resolveWithin,
+  SKILL_PATH_PATTERNS,
 } from '../github.js';
 
 test('parseRepo reads owner/repo', () => {
@@ -148,5 +150,64 @@ test('fetchTimeoutMs ignores an unusable override', () => {
   } finally {
     if (original === undefined) delete process.env.TOOLSHED_FETCH_TIMEOUT_MS;
     else process.env.TOOLSHED_FETCH_TIMEOUT_MS = original;
+  }
+});
+
+test('maxDownloadBytes caps an archive download', () => {
+  const original = process.env.TOOLSHED_MAX_DOWNLOAD_BYTES;
+  delete process.env.TOOLSHED_MAX_DOWNLOAD_BYTES;
+  try {
+    // The `expo/exact` archive is over 210 MB and holds eight skill files.
+    // A cap below that is what stops the fetch from running unbounded.
+    assert.ok(maxDownloadBytes() <= 100 * 1024 * 1024);
+    assert.ok(maxDownloadBytes() > 0);
+  } finally {
+    if (original !== undefined) process.env.TOOLSHED_MAX_DOWNLOAD_BYTES = original;
+  }
+});
+
+test('maxDownloadBytes reads an override', () => {
+  const original = process.env.TOOLSHED_MAX_DOWNLOAD_BYTES;
+  process.env.TOOLSHED_MAX_DOWNLOAD_BYTES = '1024';
+  try {
+    assert.equal(maxDownloadBytes(), 1024);
+  } finally {
+    if (original === undefined) delete process.env.TOOLSHED_MAX_DOWNLOAD_BYTES;
+    else process.env.TOOLSHED_MAX_DOWNLOAD_BYTES = original;
+  }
+});
+
+test('maxDownloadBytes ignores an unusable override', () => {
+  const original = process.env.TOOLSHED_MAX_DOWNLOAD_BYTES;
+  process.env.TOOLSHED_MAX_DOWNLOAD_BYTES = 'not-a-number';
+  try {
+    assert.ok(maxDownloadBytes() > 0);
+  } finally {
+    if (original === undefined) delete process.env.TOOLSHED_MAX_DOWNLOAD_BYTES;
+    else process.env.TOOLSHED_MAX_DOWNLOAD_BYTES = original;
+  }
+});
+
+test('the sparse patterns name the conventional skill locations', () => {
+  // A sparse checkout that misses a location silently loses skills, so
+  // each of the places a repository puts them must be named.
+  assert.ok(SKILL_PATH_PATTERNS.includes('skills/*'));
+  assert.ok(SKILL_PATH_PATTERNS.includes('.claude/skills/*'));
+  assert.ok(SKILL_PATH_PATTERNS.includes('agents/*'));
+});
+
+test('the sparse patterns stay shallow', () => {
+  // The point of the sparse checkout is to leave the bulk of the tree
+  // alone, so no pattern may reach arbitrarily deep.
+  for (const pattern of SKILL_PATH_PATTERNS) {
+    const wildcards = (pattern.match(/\*/g) ?? []).length;
+    assert.ok(wildcards <= 3, `pattern too deep: ${pattern}`);
+  }
+});
+
+test('the sparse patterns are relative paths', () => {
+  for (const pattern of SKILL_PATH_PATTERNS) {
+    assert.ok(!pattern.startsWith('/'), `absolute pattern: ${pattern}`);
+    assert.ok(!pattern.includes('..'), `traversal in pattern: ${pattern}`);
   }
 });

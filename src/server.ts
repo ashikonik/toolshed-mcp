@@ -10,7 +10,7 @@ import { describeSource, loadGithubSource, loadSource } from './sources.js';
 import { inventoryMcpServers, summariseServers } from './mcp-servers.js';
 import { missingBuiltinReport, probeAgentTypes } from './agent-types.js';
 import {
-  fetchRepo,
+  fetchRepoSparseFirst,
   fetchSkill,
   isSafeRelativePath,
   isValidSkillName,
@@ -807,7 +807,7 @@ async function handleCall(
 
           let result;
           try {
-            result = await fetchRepo(repo, target, {
+            result = await fetchRepoSparseFirst(repo, target, {
               ref: typeof args.ref === 'string' ? args.ref : undefined,
               timeoutMs:
                 typeof args.timeout_ms === 'number' ? args.timeout_ms : undefined,

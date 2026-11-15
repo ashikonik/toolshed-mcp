@@ -189,10 +189,30 @@ deliberately if you want it, and re-apply after upgrades.
 ## GitHub as a runtime source
 
 `add_github_source` fetches a repository, indexes its `SKILL.md` files and makes
-them searchable like any local corpus. The fetch is a zip from `codeload`, with
-a detached `git clone` fallback for repositories the zip cannot serve.
+them searchable like any local corpus.
 
-Safety properties, all of them tested:
+### How the fetch works
+
+The fetch is a **blobless partial clone** with a sparse checkout restricted to
+the conventional skill paths. The server is asked for tree objects only, and
+the blobs for the paths that matter are fetched on demand.
+
+This matters because a GitHub archive is unbounded. The `expo/exact` archive is
+**212 MB** and holds **eight skill files**. The sparse clone of the same
+repository is **39 KB** of skill files and about **3 MB** on disk:
+
+| Repository | Archive route | Sparse clone route |
+|---|---|---|
+| `expo/exact` | 212 MB, 8 entries | 3 MB, 8 entries |
+| `anthropics/skills` | 12 MB, 20 entries | 1 MB, 20 entries |
+
+A registry that indexes skills has no use for a repository's assets, source
+code or history, so it does not download them.
+
+The archive route from `codeload` remains as a **fallback**, for repositories
+where git is unavailable or the sparse clone finds nothing.
+
+### Safety properties, all of them tested
 
 - **Dry run by default.** `apply: true` is required to write anything.
 - **A token is never echoed.** `GITHUB_TOKEN` is read from the environment and
@@ -202,9 +222,13 @@ Safety properties, all of them tested:
   whole archive.
 - **A skill path is validated** before anything is fetched or written: no
   absolute paths, no `..`, no separators.
+- **A download cap.** The archive route refuses to exceed
+  `TOOLSHED_MAX_DOWNLOAD_BYTES` (50 MB by default) and says what to change. The
+  sparse route is bounded by the sparse checkout itself.
 
 `install_skill_from_github` fetches one skill and hands the install to
-`skills-library`, as described above.
+`skills-library`, as described above. The requested path is added to the sparse
+checkout patterns, so a skill in an unusual location is still found.
 
 ---
 
@@ -257,6 +281,8 @@ carries no absolute path to any machine.
 | `TOOLSHED_HOME` | Where the cache and the source registry live (default `~/.toolshed`) |
 | `TOOLSHED_CACHE_ROOT` | Where fetched repositories are cached |
 | `TOOLSHED_PROXY_CONFIG` | Where the proxy target list lives (default `~/.toolshed/proxies.json`) |
+| `TOOLSHED_FETCH_TIMEOUT_MS` | How long a repository fetch may take (default 600000) |
+| `TOOLSHED_MAX_DOWNLOAD_BYTES` | The largest archive the fallback route will download (default 52428800) |
 
 `TOOLSHED_SOURCES` takes a JSON array of source definitions:
 
