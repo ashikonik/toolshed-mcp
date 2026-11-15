@@ -253,6 +253,44 @@ export class Registry {
     return byName.length > 0 ? byName[0] : undefined;
   }
 
+  /**
+   * Find one entry by any of the id forms a caller may hold.
+   *
+   * The full id is `skill:<source>:<name>`. A caller that only knows the
+   * kind and the name — `skill:api-design` — would otherwise be told the
+   * entry does not exist, because the kind prefix is not the id prefix.
+   * Both forms resolve here, as does the bare name.
+   */
+  findLoose(idOrName: string): RegistryEntry | undefined {
+    const direct = this.find(idOrName);
+    if (direct) return direct;
+
+    const trimmed = idOrName.trim();
+    const separator = trimmed.indexOf(':');
+    if (separator <= 0) return undefined;
+
+    // `skill:api-design` — the kind and the name, but no source.
+    const kind = trimmed.slice(0, separator).trim().toLowerCase();
+    const rest = trimmed.slice(separator + 1).trim();
+    if (rest.length === 0) return undefined;
+
+    // The rest may itself be a full id (`skill:sna:api-design`), in which
+    // case the kind is the first segment and the name is the last.
+    const parts = rest.split(':');
+    const name = parts[parts.length - 1].trim();
+    const source = parts.length > 1 ? parts[0].trim() : undefined;
+
+    const wanted = normaliseKey(name);
+    const candidates = this.all().filter((e) => {
+      const entryKind = e.id.split(':')[0]?.toLowerCase() ?? '';
+      if (kind !== 'skill' && kind !== 'agent' && kind !== 'command') return false;
+      if (entryKind !== kind) return false;
+      if (source && e.source !== source) return false;
+      return normaliseKey(e.name) === wanted;
+    });
+    return candidates.length > 0 ? candidates[0] : undefined;
+  }
+
   /** All entries sharing a name, across sources. */
   findAllByName(name: string): RegistryEntry[] {
     const normalised = normaliseKey(name);

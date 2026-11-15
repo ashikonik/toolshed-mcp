@@ -145,6 +145,8 @@ function toolDefinitions() {
       title: 'Read one entry',
       description:
         'Read one skill, agent or command by id or name, including its frontmatter and body. ' +
+        'The id is `skill:<source>:<name>`, and the shorter `skill:<name>` and a bare ' +
+        'name also resolve. ' +
         'Not covered by get_entry_bundle, which also returns supporting files.',
       inputSchema: {
         id: z.string().describe('Entry id or name.'),
@@ -648,7 +650,7 @@ async function handleCall(
           const id = String(args.id ?? '');
           if (id.trim().length === 0) return asError('id is required');
           const source = typeof args.source === 'string' ? args.source : undefined;
-          let entry = deps.registry.find(id);
+          let entry = deps.registry.findLoose(id);
           if (!entry || (source && entry.source !== source)) {
             const all = source
               ? deps.registry.all().filter((e) => e.source === source)
@@ -676,7 +678,7 @@ async function handleCall(
         return guard('get_entry_bundle', () => {
           const id = String(args.id ?? '');
           if (id.trim().length === 0) return asError('id is required');
-          const entry = deps.registry.find(id);
+          const entry = deps.registry.findLoose(id);
           if (!entry) {
             return asError(`No entry found for '${id}'.`);
           }

@@ -133,8 +133,31 @@ test('registry loads a skill directory corpus', () => {
   }
 });
 
-test('registry picks up a change to a source without a restart', () => {
-  const root = mkdtempSync(join(tmpdir(), 'toolshed-live-'));
+test('findLoose resolves the kind-and-name form of an id', () => {
+  // The documented id form is `skill:<name>`; the stored id is
+  // `skill:<source>:<name>`. Both must resolve.
+  const root = mkdtempSync(join(tmpdir(), 'toolshed-loose-'));
+  try {
+    const skillDir = join(root, 'demo');
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(
+      join(skillDir, 'SKILL.md'),
+      '---\nname: demo\ndescription: Does demo things.\n---\n\nBody.\n',
+    );
+    const registry = new Registry([
+      { id: 'test', label: 'Test', root, origin: 'local', layout: 'skill-dirs' },
+    ]);
+    assert.equal(registry.findLoose('skill:demo')?.name, 'demo');
+    assert.equal(registry.findLoose('demo')?.name, 'demo');
+    assert.equal(registry.findLoose('skill:test:demo')?.name, 'demo');
+    assert.equal(registry.findLoose('skill:other:demo'), undefined);
+    assert.equal(registry.findLoose('agent:demo'), undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('registry picks up a change to a source without a restart', () => {  const root = mkdtempSync(join(tmpdir(), 'toolshed-live-'));
   try {
     const skillDir = join(root, 'demo');
     mkdirSync(skillDir, { recursive: true });
