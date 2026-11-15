@@ -20,11 +20,16 @@ npm run --silent build
 
 echo "run-tests: running tests"
 set +e
-node --test "dist/tests/" 2>&1 | tee /tmp/toolshed-test-output.txt
+node --test --test-reporter=tap "dist/tests/" 2>&1 | tee /tmp/toolshed-test-output.txt
 STATUS=${PIPESTATUS[0]}
 set -e
 
-COUNT=$(grep -cE '^# (pass|tests) ' /tmp/toolshed-test-output.txt 2>/dev/null || true)
+# The TAP reporter is requested explicitly because `node --test` picks the
+# spec reporter on some versions and TAP on others, and the two report
+# their counts in different shapes: TAP writes `# pass 108`, the spec
+# reporter writes `ℹ pass 108`. Parsing one shape and not the other makes
+# the wrapper report "zero tests passed" on a green run, which then fails
+# the build for a test suite that passed.
 PASSED=$(grep -E '^# pass ' /tmp/toolshed-test-output.txt 2>/dev/null | tail -1 | awk '{print $3}')
 
 if [ -z "${PASSED:-}" ] || [ "${PASSED}" = "0" ]; then
