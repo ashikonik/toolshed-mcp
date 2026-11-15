@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.log
+*.tsbuildinfo
+
+# Runtime state. The toolshed owns these; they hold machine-specific paths
+# and fetched content that must never be published.
+corpora/
+cache/
+.sources.json
+proxies.json
+
+# The skills-library's own per-machine install manifest. It records the
+# absolute paths this machine's installs wrote, so it is state, not source.
+.skills-library/

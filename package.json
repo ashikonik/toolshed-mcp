@@ -1,0 +1,34 @@
+{
+  "name": "toolshed-mcp",
+  "version": "0.1.0",
+  "description": "A standalone registry and proxy for local agent capability: skills, agents, commands and MCP servers from every corpus on the machine.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "toolshed-mcp": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "scripts",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "npm run build",
+    "test": "bash scripts/run-tests.sh"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "yaml": "^2.8.1",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}
