@@ -22,7 +22,23 @@ async function main(): Promise<void> {
     `[toolshed] ready: ${deps.registry.all().length} entries, ${deps.pool.list().length} proxy target(s)\n`,
   );
 
+  let shuttingDown = false;
   const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
+    // A client that closes stdin expects the server to stop, but a request
+    // may still be in flight — a proxied call spawns a child process and
+    // takes a moment. Exiting on the spot abandons that call with no
+    // response, so the outstanding requests are awaited first.
+    const pending = [...(deps.inFlight ?? [])];
+    if (pending.length > 0) {
+      process.stderr.write(
+        `[toolshed] ${signal}, waiting for ${pending.length} in-flight call(s)\n`,
+      );
+      await Promise.allSettled(pending);
+    }
+
     process.stderr.write(`[toolshed] ${signal}, shutting down\n`);
     try {
       await deps.pool.closeAll();
@@ -36,6 +52,14 @@ async function main(): Promise<void> {
     }
     process.exit(0);
   };
+
+  // The SDK's stdio transport listens for `data` and `error` on stdin but
+  // not for `end`, so a client that closes its end of the pipe never
+  // triggers the transport's close. Without this the server would keep
+  // running after its client is gone, held open by a proxied child.
+  process.stdin.on('end', () => {
+    void shutdown('stdin closed');
+  });
 
   process.on('SIGINT', () => {
     void shutdown('SIGINT');

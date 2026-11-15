@@ -64,6 +64,14 @@ export interface Deps {
   proxyConfigPath: string;
   /** Where fetched corpora are staged for skills-library. */
   corpusRoot: string;
+  /**
+   * The calls that are currently running.
+   *
+   * A shutdown that closes stdin while a request is in flight would
+   * otherwise abandon it with no response. The entry point waits on these
+   * before it closes anything.
+   */
+  inFlight?: Set<Promise<unknown>>;
 }
 
 /** The kind of entry a tool call refers to. */
@@ -563,21 +571,33 @@ export function createServer(deps: Deps): McpServer {
         annotations: def.annotations,
       } as never,
       (async (args: Record<string, unknown>) => {
-        const outcome = await handleCall(
-          deps,
-          name,
-          (args ?? {}) as Record<string, unknown>,
-        );
-        const result: {
-          content: { type: 'text'; text: string }[];
-          isError?: boolean;
-        } = {
-          content: [{ type: 'text', text: outcome.text }],
-        };
-        if (outcome.isError) {
-          result.isError = true;
+        const work = (async () => {
+          const outcome = await handleCall(
+            deps,
+            name,
+            (args ?? {}) as Record<string, unknown>,
+          );
+          const result: {
+            content: { type: 'text'; text: string }[];
+            isError?: boolean;
+          } = {
+            content: [{ type: 'text', text: outcome.text }],
+          };
+          if (outcome.isError) {
+            result.isError = true;
+          }
+          return result;
+        })();
+        // The call is registered before it is awaited, so a shutdown that
+        // begins while it is running can wait for it.
+        const tracked = deps.inFlight
+          ? (deps.inFlight.add(work), work)
+          : work;
+        try {
+          return await tracked;
+        } finally {
+          deps.inFlight?.delete(tracked);
         }
-        return result;
       }) as never,
     );
   }
@@ -1113,6 +1133,7 @@ export function defaultDeps(): Deps {
     cacheRoot,
     proxyConfigPath,
     corpusRoot: corpus,
+    inFlight: new Set<Promise<unknown>>(),
   };
 }
 
